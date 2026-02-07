@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mole Racer - Dig to Victory!</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 10px;
+            background: linear-gradient(to bottom, #87CEEB 0%, #4CAF50 100%);
+            font-family: 'Comic Sans MS', cursive, sans-serif;
+            overflow-x: hidden;
+        }
+        
+        #gameContainer {
+            text-align: center;
+            max-width: 420px;
+            margin: 0 auto;
+        }
+        
+        #controls {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+            margin-top: 15px;
+        }
+        
+        canvas {
+            border: 4px solid #654321;
+            border-radius: 10px;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.3);
+            background: #8B4513;
+            display: block;
+            margin: 0 auto;
+        }
+        
+        #touchControls {
+            display: none;
+            margin-top: 15px;
+            gap: 10px;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        .touchButton {
+            font-size: 32px;
+            padding: 15px 25px;
+            background: rgba(255,255,255,0.9);
+            border: 3px solid #654321;
+            border-radius: 15px;
+            cursor: pointer;
+            user-select: none;
+            transition: transform 0.1s;
+            touch-action: manipulation;
+        }
+        
+        .touchButton:active {
+            transform: scale(0.9);
+            background: rgba(200,200,200,0.9);
+        }
+        
+        #startButton {
+            font-size: 18px;
+            padding: 15px 25px;
+            background: #FF8C00;
+            color: white;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: bold;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+            transition: transform 0.1s;
+            margin: 0 10px;
+        }
+        
+        #startButton:hover {
+            transform: scale(1.05);
+            background: #FF7700;
+        }
+        
+        #startButton:active {
+            transform: scale(0.95);
+        }
+        
+        @media (max-width: 450px) {
+            canvas {
+                width: 100% !important;
+                height: auto !important;
+            }
+            
+            #gameContainer {
+                padding: 0 5px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="gameContainer">
+        <canvas id="gameCanvas"></canvas>
+        <div id="controls">
+            <button class="touchButton" id="leftButton">←</button>
+            <button id="startButton">Start</button>
+            <button class="touchButton" id="rightButton">→</button>
+        </div>
+        <div id="touchControls"></div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const startButton = document.getElementById('startButton');
+        const leftButton = document.getElementById('leftButton');
+        const rightButton = document.getElementById('rightButton');
+        
+        // Detect mobile/touch device
+        const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+        
+        // Hide arrow buttons on desktop (keyboard users)
+        if (!isMobile) {
+            leftButton.style.display = 'none';
+            rightButton.style.display = 'none';
+        }
+        
+        canvas.width = 400;
+        canvas.height = 600;
+        
+        let gameState = 'ready'; // ready, playing, won, lost
+        let mole = {
+            x: canvas.width / 2,
+            y: 1150, // Start near the bottom
+            width: 30,
+            height: 30,
+            speed: 1.5
+        };
+        
+        let obstacles = [];
+        let clearedPath = [];
+        let scrollOffset = 0;
+        let totalDirtDepth = 1200; // Total depth to dig through
+        let keys = {};
+        let score = 0;
+        let level = 1;
+        let totalScore = 0;
+        let gamesWon = 0;
+        
+        // Function to update button text based on game state
+        function updateButtonText() {
+            if (gameState === 'ready' || gameState === 'won' || gameState === 'lost') {
+                startButton.textContent = 'Start';
+            } else if (gameState === 'playing') {
+                startButton.textContent = 'Restart';
+            }
+        }
+        
+        // Obstacle types
+        const obstacleTypes = [
+            { type: 'rock', color: '#696969', emoji: '🪨', isHazard: true, points: 0 },
+            { type: 'bug', color: '#8B4513', emoji: '🐛', isHazard: false, points: 2 },
+            { type: 'root', color: '#8B7355', emoji: '🌿', isHazard: false, points: 1 },
+            { type: 'stick', color: '#8B4513', emoji: '🪵', isHazard: true, points: 0 },
+            { type: 'worm', color: '#FF69B4', emoji: '🪱', isHazard: false, points: 3 } // New collectible from level 4
+        ];
+        
+        function init() {
+            obstacles = [];
+            clearedPath = [];
+            scrollOffset = totalDirtDepth - canvas.height; // Start scrolled to bottom
+            mole.x = canvas.width / 2;
+            mole.y = 1150; // Start near the bottom
+            score = 0;
+            
+            // Generate obstacles with level-based difficulty
+            const safeZone = totalDirtDepth * 0.85; // Last 15% (top portion) is obstacle-free
+            
+            // Level affects rock chance and number of obstacles
+            const levelDifficulty = Math.min(level - 1, 10) / 10; // Caps at level 11 for max difficulty
+            const hasSticks = level >= 3; // Sticks appear starting at level 3
+            const hasWorms = level >= 4; // Worms appear starting at level 4
+            
+            for (let y = 200; y < safeZone; y += 100) {
+                // Calculate progress through the game (0 at bottom to 1 near top)
+                const progress = 1 - (y / totalDirtDepth);
+                
+                // Number of obstacles increases with level and progress
+                const baseObstacles = 2 + Math.floor(Math.random() * 4); // 2-5 base (doubled from 1-2)
+                const levelBonus = Math.floor(levelDifficulty * 4); // 0-4 extra from level (doubled from 0-2)
+                const progressBonus = progress > 0.5 ? Math.floor(Math.random() * 4) : 0; // 0-3 extra in upper half (doubled from 0-1)
+                const numObstacles = baseObstacles + levelBonus + progressBonus;
+                
+                for (let i = 0; i < numObstacles; i++) {
+                    // Hazard chance increases with both progress and level
+                    // Base: 0% at bottom to 60% near top
+                    // With levels: can reach up to 90% hazards at high levels
+                    const baseHazardChance = progress * 0.6;
+                    const levelHazardBonus = levelDifficulty * 0.3; // Up to +30% from level
+                    const hazardChance = Math.min(baseHazardChance + levelHazardBonus, 0.9);
+                    
+                    let obsType;
+                    if (Math.random() < hazardChance) {
+                        // Place a hazard (rock or stick)
+                        if (hasSticks && Math.random() < 0.3) {
+                            // 30% chance for stick when sticks are unlocked
+                            obsType = obstacleTypes[3]; // stick
+                        } else {
+                            obsType = obstacleTypes[0]; // rock
+                        }
+                    } else {
+                        // Place a collectible (leaf, bug, or worm)
+                        if (hasWorms && Math.random() < 0.15) {
+                            // 15% chance for worm when worms are unlocked (rare!)
+                            obsType = obstacleTypes[4]; // worm
+                        } else if (Math.random() < 0.5) {
+                            obsType = obstacleTypes[1]; // bug (2 points)
+                        } else {
+                            obsType = obstacleTypes[2]; // leaf (1 point)
+                        }
+                    }
+                    
+                    obstacles.push({
+                        x: Math.random() * (canvas.width - 80) + 40,
+                        y: y,
+                        width: obsType.type === 'root' ? 80 : (obsType.type === 'stick' ? 60 : 35),
+                        height: obsType.type === 'root' ? 15 : (obsType.type === 'stick' ? 20 : 35),
+                        collected: false,
+                        ...obsType
+                    });
+                }
+            }
+        }
+        
+        function drawDirt() {
+            const dirtColor = '#8B4513';
+            ctx.fillStyle = dirtColor;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Add simple brown dot texture
+            // Using seeded random for static pattern
+            const seed = 12345;
+            let random = seed;
+            
+            for (let i = 0; i < 300; i++) {
+                // Simple pseudo-random that's deterministic
+                random = (random * 9301 + 49297) % 233280;
+                const x = (random / 233280) * canvas.width;
+                random = (random * 9301 + 49297) % 233280;
+                const y = (random / 233280) * canvas.height;
+                
+                // Vary shades of brown for the dots
+                const shade = Math.floor((random / 233280) * 3);
+                if (shade === 0) {
+                    ctx.fillStyle = 'rgba(101, 67, 33, 0.6)'; // Darker brown
+                } else if (shade === 1) {
+                    ctx.fillStyle = 'rgba(139, 90, 43, 0.5)'; // Medium brown
+                } else {
+                    ctx.fillStyle = 'rgba(160, 110, 70, 0.4)'; // Lighter brown
+                }
+                
+                ctx.fillRect(x, y, 2, 2);
+            }
+        }
+        
+        
+        function drawBackground() {
+            // Calculate how close we are to the surface (0 = bottom, 1 = surface)
+            const progress = 1 - (mole.y / totalDirtDepth);
+            
+            // When we get close to surface (last 30%), start showing the finish line
+            if (progress > 0.7) {
+                // Calculate where the grass line should appear on screen
+                const grassWorldY = 0; // Grass is at y=0 in world coordinates
+                const grassScreenY = grassWorldY - scrollOffset;
+                
+                // If grass is visible on screen
+                if (grassScreenY < canvas.height && grassScreenY > -100) {
+                    // Sky (above grass line)
+                    if (grassScreenY > 0) {
+                        const skyGradient = ctx.createLinearGradient(0, 0, 0, grassScreenY);
+                        skyGradient.addColorStop(0, '#87CEEB');
+                        skyGradient.addColorStop(1, '#E0F6FF');
+                        ctx.fillStyle = skyGradient;
+                        ctx.fillRect(0, 0, canvas.width, Math.max(0, grassScreenY));
+                    }
+                    
+                    // Grass line (finish line)
+                    const grassHeight = 40;
+                    ctx.fillStyle = '#4CAF50';
+                    ctx.fillRect(0, grassScreenY, canvas.width, grassHeight);
+                    
+                    // Grass blades on top
+                    ctx.fillStyle = '#45a049';
+                    for (let x = 0; x < canvas.width; x += 10) {
+                        const bladeHeight = 10 + Math.random() * 10;
+                        ctx.fillRect(x, grassScreenY - bladeHeight, 3, bladeHeight);
+                    }
+                    
+                    // Add flowers to grass
+                    ctx.font = '16px Arial';
+                    for (let x = 20; x < canvas.width; x += 60) {
+                        ctx.fillText(['🌼', '🌸', '🌺'][Math.floor(x / 60) % 3], x, grassScreenY + 15);
+                    }
+                    
+                    // Brown dirt below grass
+                    if (grassScreenY + grassHeight < canvas.height) {
+                        ctx.fillStyle = '#8B4513';
+                        ctx.fillRect(0, grassScreenY + grassHeight, canvas.width, canvas.height - grassScreenY - grassHeight);
+                        
+                        // Add simple brown dot texture
+                        const dirtStartY = grassScreenY + grassHeight;
+                        const dirtEndY = canvas.height;
+                        
+                        let random = 54321;
+                        for (let i = 0; i < 150; i++) {
+                            random = (random * 9301 + 49297) % 233280;
+                            const x = (random / 233280) * canvas.width;
+                            random = (random * 9301 + 49297) % 233280;
+                            const y = dirtStartY + ((random / 233280) * (dirtEndY - dirtStartY));
+                            
+                            const shade = Math.floor((random / 233280) * 3);
+                            if (shade === 0) {
+                                ctx.fillStyle = 'rgba(101, 67, 33, 0.6)';
+                            } else if (shade === 1) {
+                                ctx.fillStyle = 'rgba(139, 90, 43, 0.5)';
+                            } else {
+                                ctx.fillStyle = 'rgba(160, 110, 70, 0.4)';
+                            }
+                            
+                            ctx.fillRect(x, y, 2, 2);
+                        }
+                    }
+                } else {
+                    // Grass not visible yet - just dirt
+                    drawDirt();
+                }
+            } else {
+                // Still deep underground - just show dirt
+                drawDirt();
+            }
+        }
+        
+        function drawSurface() {
+            // Sky
+            const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            gradient.addColorStop(0, '#87CEEB');
+            gradient.addColorStop(0.7, '#E0F6FF');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height * 0.6);
+            
+            // Grass
+            ctx.fillStyle = '#4CAF50';
+            ctx.fillRect(0, canvas.height * 0.6, canvas.width, canvas.height * 0.4);
+            
+            // Grass blades
+            ctx.fillStyle = '#45a049';
+            for (let x = 0; x < canvas.width; x += 10) {
+                const height = 10 + Math.random() * 15;
+                ctx.fillRect(x, canvas.height * 0.6 - height, 3, height);
+            }
+            
+            // Sun
+            ctx.fillStyle = '#FFD700';
+            ctx.beginPath();
+            ctx.arc(canvas.width - 60, 60, 30, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Clouds
+            drawCloud(80, 80, 40);
+            drawCloud(250, 120, 35);
+        }
+        
+        function drawCloud(x, y, size) {
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+            ctx.beginPath();
+            ctx.arc(x, y, size, 0, Math.PI * 2);
+            ctx.arc(x + size * 0.7, y, size * 0.8, 0, Math.PI * 2);
+            ctx.arc(x + size * 1.3, y, size * 0.6, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        
+        function drawMole() {
+            const screenY = mole.y - scrollOffset;
+            
+            // Mole body
+            ctx.fillStyle = '#654321';
+            ctx.beginPath();
+            ctx.ellipse(mole.x, screenY, mole.width / 2, mole.height / 2, 0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Snout
+            ctx.fillStyle = '#E5C8A8';
+            ctx.beginPath();
+            ctx.ellipse(mole.x, screenY + 8, 10, 8, 0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Nose
+            ctx.fillStyle = '#000000';
+            ctx.beginPath();
+            ctx.arc(mole.x, screenY + 8, 3, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Eyes
+            ctx.fillStyle = '#000000';
+            ctx.beginPath();
+            ctx.arc(mole.x - 8, screenY - 3, 2, 0, Math.PI * 2);
+            ctx.arc(mole.x + 8, screenY - 3, 2, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Paws
+            ctx.fillStyle = '#E5C8A8';
+            ctx.beginPath();
+            ctx.arc(mole.x - 15, screenY + 12, 6, 0, Math.PI * 2);
+            ctx.arc(mole.x + 15, screenY + 12, 6, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        
+        function drawObstacles() {
+            obstacles.forEach(obs => {
+                if (obs.collected) return; // Don't draw collected items
+                
+                const screenY = obs.y - scrollOffset;
+                if (screenY > -50 && screenY < canvas.height + 50) {
+                    ctx.font = '30px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(obs.emoji, obs.x, screenY);
+                }
+            });
+        }
+        
+        function drawClearedPath() {
+            ctx.fillStyle = '#A0826D';
+            clearedPath.forEach(point => {
+                const screenY = point.y - scrollOffset;
+                if (screenY > -50 && screenY < canvas.height + 50) {
+                    ctx.beginPath();
+                    ctx.arc(point.x, screenY, 20, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            });
+        }
+        
+        function drawProgress() {
+            // Progress is now from bottom (0%) to top (100%)
+            const progress = 1 - (mole.y / totalDirtDepth);
+            const barWidth = canvas.width - 40;
+            const barHeight = 20;
+            const x = 20;
+            const y = canvas.height - 30;
+            
+            // Background
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillRect(x, y, barWidth, barHeight);
+            
+            // Progress
+            ctx.fillStyle = '#FF5C35';
+            ctx.fillRect(x, y, barWidth * progress, barHeight);
+            
+            // Border
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(x, y, barWidth, barHeight);
+            
+            // Text
+            ctx.fillStyle = '#000000';
+            ctx.font = 'bold 12px Helvetica, Arial, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(`${Math.floor(Math.max(0, Math.min(100, progress * 100)))}%`, canvas.width / 2, y + 14);
+        }
+        
+        function drawScore() {
+            // Score display in top right - minimal design
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillRect(canvas.width - 110, 10, 100, 60);
+            
+            // Border
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(canvas.width - 110, 10, 100, 60);
+            
+            // Level text
+            ctx.fillStyle = '#000000';
+            ctx.font = 'bold 14px Helvetica, Arial, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(`LVL ${level}`, canvas.width - 60, 28);
+            
+            // Score text
+            ctx.fillStyle = '#FF5C35';
+            ctx.font = 'bold 24px Helvetica, Arial, sans-serif';
+            ctx.fillText(`${score}`, canvas.width - 60, 53);
+        }
+        
+        function checkCollision(rect1, rect2) {
+            return rect1.x < rect2.x + rect2.width &&
+                   rect1.x + rect1.width > rect2.x &&
+                   rect1.y < rect2.y + rect2.height &&
+                   rect1.y + rect1.height > rect2.y;
+        }
+        
+        function update() {
+            if (gameState !== 'playing') return;
+            
+            // Move mole
+            if (keys['ArrowLeft'] && mole.x > mole.width / 2) {
+                mole.x -= mole.speed;
+            }
+            if (keys['ArrowRight'] && mole.x < canvas.width - mole.width / 2) {
+                mole.x += mole.speed;
+            }
+            
+            // Only move upward if we haven't reached the surface yet
+            if (mole.y > 0) {
+                // Auto-scroll up (moving toward surface)
+                mole.y -= 1.2;
+                
+                // Keep mole in view
+                if (mole.y - scrollOffset < canvas.height * 0.4) {
+                    scrollOffset = mole.y - canvas.height * 0.4;
+                }
+            }
+            
+            // Add cleared path
+            clearedPath.push({ x: mole.x, y: mole.y });
+            if (clearedPath.length > 100) {
+                clearedPath.shift();
+            }
+            
+            // Check for collisions
+            obstacles.forEach(obs => {
+                if (obs.collected) return; // Skip already collected items
+                
+                // Reduce hitbox size for more precise collision (50% smaller)
+                const hitboxReduction = 0.5;
+                const obsHitbox = {
+                    x: obs.x - (obs.width * hitboxReduction) / 2,
+                    y: obs.y - (obs.height * hitboxReduction) / 2,
+                    width: obs.width * hitboxReduction,
+                    height: obs.height * hitboxReduction
+                };
+                
+                if (checkCollision(
+                    { x: mole.x - mole.width / 2, y: mole.y - mole.height / 2, width: mole.width, height: mole.height },
+                    obsHitbox
+                )) {
+                    if (obs.isHazard) {
+                        // Hit a rock or stick - game over
+                        gameState = 'lost';
+                        updateButtonText();
+                    } else {
+                        // Collected a bug, leaf, or worm - add points
+                        obs.collected = true;
+                        score += obs.points;
+                    }
+                }
+            });
+            
+            // Check if reached surface (grass line)
+            if (mole.y <= 0) {
+                // Update stats
+                gamesWon++;
+                totalScore += score;
+                
+                gameState = 'won';
+                updateButtonText();
+            }
+        }
+        
+        function draw() {
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            if (gameState === 'ready') {
+                // Instructions screen
+                drawDirt();
+                
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+                ctx.fillRect(20, 40, canvas.width - 40, canvas.height - 80);
+                
+                ctx.strokeStyle = '#FFD700';
+                ctx.lineWidth = 3;
+                ctx.strokeRect(20, 40, canvas.width - 40, canvas.height - 80);
+                
+                ctx.fillStyle = '#FFD700';
+                ctx.font = 'bold 28px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('🦡 Mole Racer 🦡', canvas.width / 2, 80);
+                
+                ctx.fillStyle = '#ffffff';
+                ctx.font = '18px Arial';
+                ctx.fillText('Dig to the surface!', canvas.width / 2, 115);
+                
+                // Collectibles
+                ctx.font = 'bold 20px Arial';
+                ctx.fillStyle = '#4CAF50';
+                ctx.fillText('Collect:', canvas.width / 2, 160);
+                
+                ctx.font = '16px Arial';
+                ctx.fillStyle = '#ffffff';
+                ctx.textAlign = 'left';
+                ctx.fillText('🌿 Leaf', 60, 195);
+                ctx.fillStyle = '#FFD700';
+                ctx.textAlign = 'right';
+                ctx.fillText('1 pt', canvas.width - 60, 195);
+                
+                ctx.fillStyle = '#ffffff';
+                ctx.textAlign = 'left';
+                ctx.fillText('🐛 Bug', 60, 225);
+                ctx.fillStyle = '#FFD700';
+                ctx.textAlign = 'right';
+                ctx.fillText('2 pts', canvas.width - 60, 225);
+                
+                ctx.fillStyle = '#888';
+                ctx.textAlign = 'left';
+                ctx.fillText('🪱 Worm (Level 4+)', 60, 255);
+                ctx.fillStyle = '#FFD700';
+                ctx.textAlign = 'right';
+                ctx.fillText('3 pts', canvas.width - 60, 255);
+                
+                // Hazards
+                ctx.font = 'bold 20px Arial';
+                ctx.fillStyle = '#ff6b6b';
+                ctx.textAlign = 'center';
+                ctx.fillText('Avoid:', canvas.width / 2, 300);
+                
+                ctx.font = '16px Arial';
+                ctx.fillStyle = '#ffffff';
+                ctx.textAlign = 'left';
+                ctx.fillText('🪨 Rock', 60, 335);
+                ctx.fillStyle = '#ff6b6b';
+                ctx.textAlign = 'right';
+                ctx.fillText('Game Over!', canvas.width - 60, 335);
+                
+                ctx.fillStyle = '#888';
+                ctx.textAlign = 'left';
+                ctx.fillText('🪵 Stick (Level 3+)', 60, 365);
+                ctx.fillStyle = '#ff6b6b';
+                ctx.textAlign = 'right';
+                ctx.fillText('Game Over!', canvas.width - 60, 365);
+                
+                // Controls
+                ctx.font = 'bold 18px Arial';
+                ctx.fillStyle = '#87CEEB';
+                ctx.textAlign = 'center';
+                ctx.fillText('Controls:', canvas.width / 2, 420);
+                
+                ctx.font = '16px Arial';
+                ctx.fillStyle = '#ffffff';
+                
+                if (isMobile) {
+                    ctx.fillText('Tap ← → buttons to move', canvas.width / 2, 450);
+                } else {
+                    ctx.fillText('Use ← → arrow keys to move', canvas.width / 2, 450);
+                }
+                
+                // Start prompt
+                ctx.font = 'bold 22px Arial';
+                ctx.fillStyle = '#4CAF50';
+                ctx.fillText('Click START to begin!', canvas.width / 2, 520);
+                
+                return;
+            }
+            
+            if (gameState === 'won') {
+                drawSurface();
+                
+                // Draw mole on surface
+                ctx.font = '60px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('🦡', canvas.width / 2, canvas.height * 0.45);
+                
+                ctx.fillStyle = '#654321';
+                ctx.font = 'bold 32px Arial';
+                ctx.fillText(`Level ${level} Complete!`, canvas.width / 2, canvas.height * 0.25);
+                
+                ctx.font = '20px Arial';
+                ctx.fillStyle = '#FFD700';
+                ctx.fillText(`Points: ${score} ⭐`, canvas.width / 2, canvas.height * 0.62);
+                
+                ctx.fillStyle = '#654321';
+                ctx.font = '18px Arial';
+                ctx.fillText(`Games Won: ${gamesWon}`, canvas.width / 2, canvas.height * 0.72);
+                ctx.fillText(`Total Points: ${totalScore} ⭐`, canvas.width / 2, canvas.height * 0.8);
+                
+                ctx.font = '16px Arial';
+                ctx.fillStyle = '#666';
+                ctx.fillText('Click Start for next level!', canvas.width / 2, canvas.height * 0.9);
+                
+                return;
+            }
+            
+            if (gameState === 'lost') {
+                drawBackground();
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                
+                ctx.fillStyle = '#ffffff';
+                ctx.font = 'bold 36px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(level >= 3 ? 'Ouch! 🪨🪵' : 'Ouch! 🪨', canvas.width / 2, canvas.height / 2 - 70);
+                
+                ctx.font = '20px Arial';
+                ctx.fillText(level >= 3 ? 'You hit an obstacle!' : 'You hit a rock!', canvas.width / 2, canvas.height / 2 - 30);
+                
+                if (gamesWon > 0) {
+                    ctx.fillStyle = '#FFD700';
+                    ctx.fillText(`You won ${gamesWon} game${gamesWon === 1 ? '' : 's'}!`, canvas.width / 2, canvas.height / 2 + 10);
+                    ctx.fillText(`Total points: ${totalScore} ⭐`, canvas.width / 2, canvas.height / 2 + 40);
+                } else {
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillText(`You scored ${score} points`, canvas.width / 2, canvas.height / 2 + 10);
+                }
+                
+                ctx.fillStyle = '#ffffff';
+                ctx.font = '18px Arial';
+                ctx.fillText('Click Start to try again', canvas.width / 2, canvas.height / 2 + 80);
+                
+                return;
+            }
+            
+            drawBackground();
+            drawClearedPath();
+            drawObstacles();
+            drawMole();
+            drawProgress();
+            drawScore();
+        }
+        
+        function gameLoop() {
+            update();
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+        
+        // Event listeners
+        startButton.addEventListener('click', () => {
+            if (gameState === 'playing') {
+                // Restart current level
+                init();
+                gameState = 'playing';
+            } else if (gameState === 'won') {
+                // Advance to next level
+                level++;
+                init();
+                gameState = 'playing';
+            } else if (gameState === 'lost') {
+                // Reset to level 1 on loss
+                level = 1;
+                gamesWon = 0;
+                totalScore = 0;
+                init();
+                gameState = 'playing';
+            } else if (gameState === 'ready') {
+                // Start first game
+                init();
+                gameState = 'playing';
+            }
+            
+            updateButtonText();
+        });
+        
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+                e.preventDefault();
+                keys[e.key] = true;
+            }
+        });
+        
+        document.addEventListener('keyup', (e) => {
+            if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+                keys[e.key] = false;
+            }
+        });
+        
+        // Touch controls for mobile
+        leftButton.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            keys['ArrowLeft'] = true;
+        });
+        
+        leftButton.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            keys['ArrowLeft'] = false;
+        });
+        
+        rightButton.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            keys['ArrowRight'] = true;
+        });
+        
+        rightButton.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            keys['ArrowRight'] = false;
+        });
+        
+        // Also support mouse for testing on desktop
+        leftButton.addEventListener('mousedown', () => {
+            keys['ArrowLeft'] = true;
+        });
+        
+        leftButton.addEventListener('mouseup', () => {
+            keys['ArrowLeft'] = false;
+        });
+        
+        leftButton.addEventListener('mouseleave', () => {
+            keys['ArrowLeft'] = false;
+        });
+        
+        rightButton.addEventListener('mousedown', () => {
+            keys['ArrowRight'] = true;
+        });
+        
+        rightButton.addEventListener('mouseup', () => {
+            keys['ArrowRight'] = false;
+        });
+        
+        rightButton.addEventListener('mouseleave', () => {
+            keys['ArrowRight'] = false;
+        });
+        
+        // Prevent scrolling on touch devices
+        document.body.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+        }, { passive: false });
+        
+        // Initialize and start game loop
+        draw();
+        gameLoop();
+    </script>
+</body>
+</html>
